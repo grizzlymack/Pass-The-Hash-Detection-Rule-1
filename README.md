@@ -165,3 +165,64 @@ If you want next, I can:
 	•	Add an alert severity rubric
 	•	Build a matching Sentinel version for parity
 	•	Help write the SOC runbook entry for triage
+
+
+
+
+// Enhanced Pass-the-Ticket Detection
+let TimeWindow = 30m;
+let SuspiciousEnc = dynamic([1, 3, 23]); // RC4, DES
+let KerbEvents = SecurityEvent
+| where EventID in (4769, 4624)  // TGS request & logon
+| extend 
+    User = Account,
+    SourceIP = IpAddress,
+    Device = DeviceName,
+    TicketOptions = tostring(EventData.TicketOptions),
+    TicketEnc = toint(EventData.TicketEncryptionType),
+    SPN = tostring(EventData.ServiceName)
+| where TimeGenerated > ago(TimeWindow);
+
+// 1. User with multiple IPs
+let MultiIP = KerbEvents
+| summarize IPs = make_set(SourceIP), CountIPs = dcount(SourceIP) by User
+| where CountIPs > 1;
+
+// 2. Correlate with Kerberos anomalies
+KerbEvents
+| where User in (MultiIP | project User)
+| join kind=inner (
+    KerbEvents
+    | where TicketEnc in (SuspiciousEnc) or SPN contains "$"
+    | project User, AnomalyTime = TimeGenerated
+) on User
+| summarize 
+    StartTime = min(TimeGenerated), 
+    EndTime = max(TimeGenerated),
+    Users = make_set(User),
+    SourceIPs = make_set(SourceIP),
+    DeviceNames = make_set(Device),
+    SPNs = make_set(SPN),
+    TicketEncs = make_set(TicketEnc),
+    TicketOptions = make_set(TicketOptions)
+by bin(TimeGenerated, 5m)
+| where array_length(SourceIPs) > 1
+
+
+
+Detection Component
+Why It’s Important
+Correlates multiple IPs
+Baseline pass-the-ticket signal
+Checks for RC4/DES encryption
+Attackers often downgrade when crafting forged tickets
+Looks for abnormal SPNs
+Fake SPNs or admin service targeting
+Clusters events inside one 5-minute block
+Captures “burst” behavior attackers generate
+Correlates TGS + Logon events
+Real attacks hit both
+Ignores VPN churn unless other anomalies appear
+Instantly reduces false positives
+
+
